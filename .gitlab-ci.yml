@@ -1,0 +1,167 @@
+image: gcr.io/google.com/cloudsdktool/cloud-sdk:alpine
+
+include:
+  - template: Auto-DevOps.gitlab-ci.yml
+
+variables:
+  SERVICE_ACCOUNT: ""
+  PROJECT_ID: ""
+  REGION: "europe-west4"
+
+build-run:
+  stage: build
+  rules:
+    - if: '$CI_COMMIT_TAG || $CI_COMMIT_BRANCH'
+  script:
+    - auth
+    - export_build_args
+    - 'gcloud --quiet builds submit
+      --project $PROJECT_ID
+      --config cloudbuild.json
+      --timeout 30m
+      --substitutions "REPO_NAME=$CI_PROJECT_PATH_SLUG,BRANCH_NAME=$CI_COMMIT_REF_SLUG,SHORT_SHA=$CI_COMMIT_SHORT_SHA,$BUILD_ARGS"'
+
+review-run:
+  stage: review
+  rules:
+    - if: '$CI_KUBERNETES_ACTIVE == null || $CI_KUBERNETES_ACTIVE == ""'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: never
+    - if: '$REVIEW_DISABLED'
+      when: never
+    - if: '$CI_COMMIT_TAG || $CI_COMMIT_BRANCH'
+  artifacts:
+    reports:
+      dotenv: deploy.env
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    url: $DYNAMIC_ENVIRONMENT_URL
+    on_stop: stop_review-run
+  script:
+    - auth
+    - export_application_secrets
+    - 'gcloud --quiet beta run deploy
+      --timeout 3600
+      --platform managed
+      --region $REGION
+      --project $PROJECT_ID
+      --allow-unauthenticated
+      --vpc-connector=connector-staging
+      --flags-file /tmp/flags.json
+      --service-account=$K8S_SECRET_GOOGLE_CREDENTIALS_CLIENT_EMAIL
+      --image gcr.io/$PROJECT_ID/$CI_PROJECT_PATH_SLUG-$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHORT_SHA $CI_PROJECT_PATH_SLUG-$CI_ENVIRONMENT_SLUG'
+    - export_review_url
+    - echo "DYNAMIC_ENVIRONMENT_URL=$DYNAMIC_ENVIRONMENT_URL" >> deploy.env
+    - gcloud --quiet run services --platform managed --region $REGION --project $PROJECT_ID update-traffic $CI_PROJECT_PATH_SLUG-$CI_ENVIRONMENT_SLUG --to-revisions=LATEST=100
+
+
+staging-run:
+  stage: staging
+  rules:
+    - if: '$CI_KUBERNETES_ACTIVE == null || $CI_KUBERNETES_ACTIVE == ""'
+      when: never
+    - if: '$CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH'
+      when: never
+    - if: '$STAGING_ENABLED'
+  environment:
+    name: staging
+    url: https://$CI_PROJECT_NAME-staging.$KUBE_INGRESS_BASE_DOMAIN
+  script:
+    - auth
+    - export_application_secrets
+    - 'gcloud --quiet beta run deploy
+      --timeout 3600
+      --platform managed
+      --region $REGION
+      --project $PROJECT_ID
+      --allow-unauthenticated
+      --vpc-connector=connector-staging
+      --flags-file /tmp/flags.json
+      --service-account=$K8S_SECRET_GOOGLE_CREDENTIALS_CLIENT_EMAIL
+      --image gcr.io/$PROJECT_ID/$CI_PROJECT_PATH_SLUG-$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHORT_SHA $CI_PROJECT_PATH_SLUG-staging'
+    - gcloud --quiet run services --platform managed --region $REGION --project $PROJECT_ID update-traffic $CI_PROJECT_PATH_SLUG-$CI_ENVIRONMENT_SLUG --to-revisions=LATEST=100
+
+production-run:
+  stage: production
+  rules:
+    - if: '$CI_KUBERNETES_ACTIVE == null || $CI_KUBERNETES_ACTIVE == ""'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CANARY_ENABLED'
+      when: manual
+  allow_failure: true
+  environment:
+    name: production
+    url: https://APP_NAME.$KUBE_INGRESS_BASE_DOMAIN
+  script:
+    - auth
+    - export_application_secrets
+    - 'gcloud --quiet beta run deploy
+      --timeout 3600
+      --platform managed
+      --region $REGION
+      --project $PROJECT_ID
+      --allow-unauthenticated
+      --vpc-connector=connector
+      --flags-file /tmp/flags.json
+      --service-account=$K8S_SECRET_GOOGLE_CREDENTIALS_CLIENT_EMAIL
+      --image gcr.io/$PROJECT_ID/$CI_PROJECT_PATH_SLUG-$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHORT_SHA $CI_PROJECT_PATH_SLUG'
+    - gcloud --quiet run services --platform managed --region $REGION --project $PROJECT_ID update-traffic $CI_PROJECT_PATH_SLUG --to-revisions=LATEST=100
+
+stop_review-run:
+  stage: cleanup
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    action: stop
+  allow_failure: true
+  rules:
+  rules:
+    - if: '$CI_KUBERNETES_ACTIVE == null || $CI_KUBERNETES_ACTIVE == ""'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: never
+    - if: '$REVIEW_DISABLED'
+      when: never
+    - if: '$CI_COMMIT_TAG || $CI_COMMIT_BRANCH'
+      when: manual
+  script:
+    - auth
+    - 'gcloud --quiet run services delete
+      --platform managed
+      --region $REGION
+      --project $PROJECT_ID
+      --region $REGION $CI_PROJECT_PATH_SLUG-$CI_ENVIRONMENT_SLUG'
+
+# Deployment helper functions
+
+.deploy_helpers: &deploy_helpers |
+
+  function auth() {
+    echo $SERVICE_ACCOUNT > /tmp/$CI_PIPELINE_ID.json
+    gcloud auth activate-service-account --key-file /tmp/$CI_PIPELINE_ID.json
+  }
+
+  function export_review_url() {
+    export DYNAMIC_ENVIRONMENT_URL=`gcloud run services describe --platform managed --region $REGION --project $PROJECT_ID $CI_PROJECT_PATH_SLUG-$CI_ENVIRONMENT_SLUG | egrep -o 'https?://[^ ]+' | head -1`
+  }
+
+  # Export BUILD_ARG_ environment vars
+  function export_build_args() {
+    export BUILD_ARGS=`env | sed -n "s/^BUILD_ARG_\(.*\)$/_\1/p" | xargs | sed -e 's/ /,/g'`
+  }
+
+  # Export K8S_SECRET_ environment vars
+  function export_application_secrets() {
+    unset K8S_SECRET_GOOGLE_CREDENTIALS_PRIVATE_KEY
+    python3 -c 'import json, os; print(json.dumps({ "--set-env-vars": { k.replace("K8S_SECRET_", ""):v for k, v in os.environ.items() if ("K8S_SECRET_" in k) } }))' > /tmp/flags.json
+  }
+
+# Hooks
+
+before_script:
+  - *deploy_helpers
+
+after_script:
+  - rm -r /tmp/*

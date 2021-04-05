@@ -1,0 +1,77 @@
+{
+  "options": {
+    "machineType": "N1_HIGHCPU_8"
+  },
+  "steps": [
+    {
+      "id": "pull-latest-master",
+      "waitFor": ["-"],
+      "name": "gcr.io/cloud-builders/docker",
+      "entrypoint": "bash",
+      "args": [
+        "-c", "docker pull gcr.io/$PROJECT_ID/$REPO_NAME-master:latest || exit 0"
+      ]
+    },
+    {
+      "id": "pull-latest-master-build",
+      "waitFor": ["-"],
+      "name": "gcr.io/cloud-builders/docker",
+      "entrypoint": "bash",
+      "args": [
+        "-c", "docker pull gcr.io/$PROJECT_ID/$REPO_NAME-master-build:latest || exit 0"
+      ]
+    },
+    {
+      "id": "pull-latest-branch",
+      "waitFor": ["-"],
+      "name": "gcr.io/cloud-builders/docker",
+      "entrypoint": "bash",
+      "args": [
+        "-c", "docker pull gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME:latest || exit 0"
+      ]
+    },
+    {
+      "id": "pull-latest-branch-build",
+      "waitFor": ["-"],
+      "name": "gcr.io/cloud-builders/docker",
+      "entrypoint": "bash",
+      "args": [
+        "-c", "docker pull gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME-build:latest || exit 0"
+      ]
+    },
+    {
+      "id": "create-build-layer",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "build",
+        "--target", "build",
+        "--tag", "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME-build:latest",
+        "--tag", "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME-build:$SHORT_SHA",
+        "--cache-from", "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME-build:latest",
+        "--cache-from", "gcr.io/$PROJECT_ID/$REPO_NAME-master-build:latest",
+        "."
+      ]
+    },
+    {
+      "id": "create-run-layer",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "build",
+        "--target", "run",
+        "--tag", "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME:latest",
+        "--tag", "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME:$SHORT_SHA",
+        "--cache-from", "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME-build:latest",
+        "--cache-from", "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME:latest",
+        "--cache-from", "gcr.io/$PROJECT_ID/$REPO_NAME-master-build:latest",
+        "--cache-from", "gcr.io/$PROJECT_ID/$REPO_NAME-master:latest",
+        "."
+      ]
+    }
+  ],
+  "images": [
+    "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME-build:latest",
+    "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME:latest",
+    "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME-build:$SHORT_SHA",
+    "gcr.io/$PROJECT_ID/$REPO_NAME-$BRANCH_NAME:$SHORT_SHA"
+  ]
+}
